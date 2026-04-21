@@ -24,7 +24,8 @@ let package = Package(
             name: "StripScrollLines"
         ),
         .executableTarget(
-            name: "SmoothDial"
+            name: "SmoothDial",
+            exclude: ["Info.plist"]
         ),
     ]
 )
