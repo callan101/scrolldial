@@ -1,6 +1,7 @@
 # scrolldial
 
 Be warned, this is pure vibe code. 
+I used https://github.com/stephancasas/CGEventSupervisor as a starting point and as a remote dependency
 
 Run
 `swift run SmoothDial 10`
