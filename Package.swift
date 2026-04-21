@@ -11,7 +11,7 @@ let package = Package(
         .executable(name: "SmoothDial", targets: ["SmoothDial"]),
     ],
     dependencies: [
-        .package(path: "./CGEventSupervisor"),
+        .package(url: "https://github.com/stephancasas/CGEventSupervisor", branch: "main"),
     ],
     targets: [
         .executableTarget(
