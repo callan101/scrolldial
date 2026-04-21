@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Foundation
 
@@ -61,10 +62,17 @@ final class SmoothDialCore {
 
     private init() {}
 
-    func start() {
-        guard !started else { return }
-        started = true
+    /// Returns `true` if the event tap was installed successfully.
+    @discardableResult
+    func start() -> Bool {
+        guard !started else { return true }
 
+        if !AXIsProcessTrusted() {
+            SmoothDialDebug.log("Accessibility permission not granted")
+            return false
+        }
+
+        started = true
         applyLaunchSensitivityOverride()
 
         let mask = CGEventMask(1 << CGEventType.scrollWheel.rawValue)
@@ -77,7 +85,8 @@ final class SmoothDialCore {
             userInfo: nil
         ) else {
             fputs("SmoothDial: CGEvent tap creation failed (check Accessibility / Input Monitoring).\n", stderr)
-            return
+            started = false
+            return false
         }
         tap = createdTap
 
@@ -90,6 +99,7 @@ final class SmoothDialCore {
         SmoothDialDebug.log(
             String(format: "event tap installed (cghid, scrollWheel); CLI scale=%.0f → ×%.3f", m * 100.0, m)
         )
+        return true
     }
 
     func stop() {
@@ -107,23 +117,41 @@ final class SmoothDialCore {
     }
 
     fileprivate func handleScroll(proxy: CGEventTapProxy, event: CGEvent) -> Unmanaged<CGEvent>? {
-        let multiplier = SmoothDialState.shared.multiplierValue()
+        let senderID = event.getIntegerValueField(kCGEventSenderID)
+        let dm = HIDDeviceManager.shared
+        let deviceLabel = dm.deviceName(forSenderID: senderID)
 
         let phase = event.getIntegerValueField(.scrollWheelEventScrollPhase)
         let momentum = event.getIntegerValueField(.scrollWheelEventMomentumPhase)
         let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous)
-
-        // Trackpad / already-continuous events pass through untouched.
-        if phase != 0 || momentum != 0 || isContinuous != 0 {
-            return Unmanaged.passUnretained(event)
-        }
-
         let ly = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
         let lx = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
         let py = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
         let px = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
         let fy = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
         let fx = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
+
+        SmoothDialDebug.log(
+            String(
+                format: "IN  [%@] sender=%lld  line=(%lld,%lld) point=(%.2f,%.2f) fixed=(%.2f,%.2f) phase=%lld momentum=%lld cont=%lld",
+                deviceLabel, senderID, lx, ly, px, py, fx, fy, phase, momentum, isContinuous
+            )
+        )
+
+        // Device filter — only smooth selected devices.
+        let allowed = dm.allowedSenderIDs
+        if !allowed.contains(senderID) {
+            SmoothDialDebug.log("OUT [skip — device not selected]")
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Trackpad / already-continuous events pass through untouched.
+        if phase != 0 || momentum != 0 || isContinuous != 0 {
+            SmoothDialDebug.log("OUT [passthrough — continuous/trackpad]")
+            return Unmanaged.passUnretained(event)
+        }
+
+        let multiplier = SmoothDialState.shared.multiplierValue()
 
         var outY = py + fy
         var outX = px + fx
@@ -164,7 +192,7 @@ final class SmoothDialCore {
 
         SmoothDialDebug.log(
             String(
-                format: "dial → precise point=(%.2f, %.2f) phase=%lld mult=×%.3f",
+                format: "OUT [smoothed] point=(%.2f,%.2f) phase=%lld mult=×%.3f",
                 outX, outY, scrollPhase, multiplier
             )
         )

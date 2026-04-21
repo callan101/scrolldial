@@ -19,9 +19,6 @@ mkdir -p "$CONTENTS/MacOS"
 cp .build/release/"$APP_NAME" "$CONTENTS/MacOS/$APP_NAME"
 cp Sources/SmoothDial/Info.plist "$CONTENTS/Info.plist"
 
-echo "==> Ad-hoc code signing…"
-codesign --force --sign - "$APP_BUNDLE"
-
 echo ""
 echo "Done: $APP_BUNDLE"
 echo "Install with:  cp -R \"$APP_BUNDLE\" /Applications/"

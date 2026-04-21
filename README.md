@@ -1,10 +1,10 @@
 # SmoothDial
 
-Converts discrete scroll dial/wheel events into smooth continuous scrolling on macOS. Menu bar app with a sensitivity slider.
+Converts discrete scroll dial/wheel events into smooth continuous scrolling on macOS. Menu bar app with sensitivity control and per-device filtering.
 
 ## Build & Install
 
-Requires Xcode (or Xcode Command Line Tools) and macOS 13+.
+Requires Xcode Command Line Tools and macOS 13+.
 
 ```bash
 git clone https://github.com/callan101/scrolldial.git
@@ -13,24 +13,19 @@ cd scrolldial
 cp -R build/SmoothDial.app /Applications/
 ```
 
-On first launch, grant Accessibility permission in **System Settings > Privacy & Security > Accessibility**.
+On first launch, grant **Accessibility** permission when prompted (or add manually in System Settings > Privacy & Security > Accessibility).
+
+## Features
+
+- **Sensitivity slider** in the menu bar dropdown
+- **Auto mode** (default) — automatically smooths devices named "Full Scroll Dial"
+- **Manual mode** — toggle on to pick specific HID devices from a submenu
+- **Debug logging** — stderr output for every scroll event with before/after details
 
 ## Development
 
-Run directly without building a .app:
-
 ```bash
-swift run SmoothDial
-```
-
-Or with a CLI sensitivity override (100 = 1×, 50 = 0.5×, 200 = 2×):
-
-```bash
-swift run SmoothDial 10
-```
-
-Enable debug logging:
-
-```bash
-swift run SmoothDial -- --debug
+swift run SmoothDial              # run with defaults
+swift run SmoothDial 10           # sensitivity override (100 = 1×, 50 = 0.5×, 200 = 2×)
+swift run SmoothDial -- --debug   # enable debug logging
 ```

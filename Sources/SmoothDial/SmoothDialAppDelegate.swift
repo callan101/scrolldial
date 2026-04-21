@@ -14,6 +14,13 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
     /// Last successfully applied sensitivity; used to revert bad text input.
     private var lastCommitted: Double = 100
 
+    private var menu: NSMenu!
+    private var manualModeToggle: ToggleSwitch!
+    private var devicesMenuItem: NSMenuItem!
+    private var deviceSubmenu: NSMenu!
+    private var deviceMenuItems: [NSMenuItem] = []
+    private var allDevicesItem: NSMenuItem!
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         lastCommitted = SmoothDialSettings.storedSensitivity()
         SmoothDialSettings.loadSavedSensitivityIntoState()
@@ -21,18 +28,35 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
             SmoothDialDebug.log("debug logging on (stderr)")
         }
 
+        HIDDeviceManager.shared.enumerate()
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             button.image = NSImage(systemSymbolName: "dial.low", accessibilityDescription: "SmoothDial")
             button.image?.isTemplate = true
         }
 
-        let menu = NSMenu()
+        menu = NSMenu()
+        menu.delegate = self
 
         let sliderView = makeSliderView()
         let sliderItem = NSMenuItem()
         sliderItem.view = sliderView
         menu.addItem(sliderItem)
+        menu.addItem(NSMenuItem.separator())
+
+        let switchView = makeManualSwitchView()
+        let switchItem = NSMenuItem()
+        switchItem.view = switchView
+        menu.addItem(switchItem)
+
+        devicesMenuItem = NSMenuItem(title: "Devices", action: nil, keyEquivalent: "")
+        deviceSubmenu = NSMenu()
+        deviceSubmenu.delegate = self
+        buildDeviceSubmenuItems()
+        devicesMenuItem.submenu = deviceSubmenu
+        devicesMenuItem.isEnabled = HIDDeviceManager.shared.isManualMode
+        menu.addItem(devicesMenuItem)
         menu.addItem(NSMenuItem.separator())
 
         let quitItem = NSMenuItem(title: "Quit SmoothDial", action: #selector(quitApp), keyEquivalent: "q")
@@ -41,7 +65,32 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
 
         statusItem.menu = menu
 
-        SmoothDialCore.shared.start()
+        if !SmoothDialCore.shared.start() {
+            promptForAccessibility()
+        }
+    }
+
+    private func promptForAccessibility() {
+        let alert = NSAlert()
+        alert.messageText = "SmoothDial needs Accessibility permission"
+        alert.informativeText = "Open System Settings, add SmoothDial to Accessibility, then click Retry."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Retry")
+        alert.addButton(withTitle: "Quit")
+
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+            promptForAccessibility()
+        case .alertSecondButtonReturn:
+            if !SmoothDialCore.shared.start() {
+                promptForAccessibility()
+            }
+        default:
+            NSApp.terminate(nil)
+        }
     }
 
     private func makeSliderView() -> NSView {
@@ -143,12 +192,163 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
         return false
     }
 
+    // MARK: - Manual device selection switch
+
+    private func makeManualSwitchView() -> NSView {
+        let w: CGFloat = 288
+        let h: CGFloat = 30
+        let padX: CGFloat = 16
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+
+        let label = NSTextField(labelWithString: "Manual device selection")
+        label.font = NSFont.systemFont(ofSize: 13)
+        label.frame = NSRect(x: padX, y: 6, width: 200, height: 18)
+
+        manualModeToggle = ToggleSwitch(isOn: HIDDeviceManager.shared.isManualMode) { [weak self] isOn in
+            HIDDeviceManager.shared.isManualMode = isOn
+            self?.devicesMenuItem.isEnabled = isOn
+        }
+        let tw: CGFloat = 32
+        let th: CGFloat = 18
+        manualModeToggle.frame = NSRect(x: w - padX - tw, y: (h - th) / 2, width: tw, height: th)
+
+        container.addSubview(label)
+        container.addSubview(manualModeToggle)
+        return container
+    }
+
+    // MARK: - Device submenu
+
+    private func buildDeviceSubmenuItems() {
+        let dm = HIDDeviceManager.shared
+
+        allDevicesItem = NSMenuItem(title: "All Devices", action: #selector(toggleAllDevices), keyEquivalent: "")
+        allDevicesItem.target = self
+        allDevicesItem.state = dm.isAllSelected ? .on : .off
+        deviceSubmenu.addItem(allDevicesItem)
+        deviceSubmenu.addItem(NSMenuItem.separator())
+
+        for device in dm.devices {
+            let item = NSMenuItem(
+                title: device.displayName,
+                action: #selector(toggleDevice(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = device.id
+            item.state = dm.isSelected(device) ? .on : .off
+            deviceSubmenu.addItem(item)
+            deviceMenuItems.append(item)
+        }
+    }
+
+    private func refreshDeviceCheckmarks() {
+        let dm = HIDDeviceManager.shared
+        allDevicesItem.state = dm.isAllSelected ? .on : .off
+        for item in deviceMenuItems {
+            guard let key = item.representedObject as? String,
+                  let device = dm.devices.first(where: { $0.id == key }) else { continue }
+            item.state = dm.isSelected(device) ? .on : .off
+        }
+    }
+
+    @objc private func toggleAllDevices() {
+        let dm = HIDDeviceManager.shared
+        let shouldSelect = !dm.isAllSelected
+        for device in dm.devices {
+            dm.setSelected(device, selected: shouldSelect)
+        }
+        refreshDeviceCheckmarks()
+    }
+
+    @objc private func toggleDevice(_ sender: NSMenuItem) {
+        let dm = HIDDeviceManager.shared
+        guard let key = sender.representedObject as? String,
+              let device = dm.devices.first(where: { $0.id == key }) else { return }
+        dm.setSelected(device, selected: !dm.isSelected(device))
+        refreshDeviceCheckmarks()
+    }
+
     @objc private func quitApp() {
         NSApp.terminate(nil)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         SmoothDialCore.shared.stop()
+    }
+}
+
+extension SmoothDialAppDelegate: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu === self.menu {
+            let manual = HIDDeviceManager.shared.isManualMode
+            manualModeToggle.setOn(manual, animated: false)
+            devicesMenuItem.isEnabled = manual
+        }
+        if menu === self.menu || menu === deviceSubmenu {
+            refreshDeviceCheckmarks()
+        }
+    }
+}
+
+// MARK: - Custom toggle switch
+
+final class ToggleSwitch: NSView {
+    private var isOn: Bool
+    private let onChange: (Bool) -> Void
+    private let knobInset: CGFloat = 2
+    private let animationDuration: TimeInterval = 0.15
+
+    private static let onColor = NSColor.controlAccentColor
+    private static let offColor = NSColor.separatorColor
+
+    init(isOn: Bool, onChange: @escaping (Bool) -> Void) {
+        self.isOn = isOn
+        self.onChange = onChange
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+
+    func setOn(_ on: Bool, animated: Bool) {
+        guard on != isOn else { return }
+        isOn = on
+        if animated {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = animationDuration
+                ctx.allowsImplicitAnimation = true
+                needsDisplay = true
+                layoutSubtreeIfNeeded()
+            }
+        } else {
+            needsDisplay = true
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let b = bounds
+        let trackRect = b
+        let radius = trackRect.height / 2
+
+        let trackColor = isOn ? Self.onColor : Self.offColor
+        trackColor.setFill()
+        NSBezierPath(roundedRect: trackRect, xRadius: radius, yRadius: radius).fill()
+
+        let knobDiameter = trackRect.height - knobInset * 2
+        let knobX = isOn
+            ? trackRect.maxX - knobInset - knobDiameter
+            : trackRect.minX + knobInset
+        let knobRect = NSRect(x: knobX, y: knobInset, width: knobDiameter, height: knobDiameter)
+
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: knobRect).fill()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isOn.toggle()
+        needsDisplay = true
+        onChange(isOn)
     }
 }
 
