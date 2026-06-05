@@ -11,6 +11,8 @@ final class SmoothDialState {
     private let lock = NSLock()
     /// Applied to converted point deltas (`out *= multiplier`). Default matches old binary with no CLI args (1×).
     private var multiplier: Double = 1.0
+    /// Negates smoothed point deltas on both axes. Does not affect passthrough events.
+    private var reverseScrollDirection: Bool = false
 
     private init() {}
 
@@ -18,6 +20,18 @@ final class SmoothDialState {
         lock.lock()
         defer { lock.unlock() }
         return multiplier
+    }
+
+    func isReverseScrollDirectionEnabled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return reverseScrollDirection
+    }
+
+    func setReverseScrollDirection(_ enabled: Bool) {
+        lock.lock()
+        reverseScrollDirection = enabled
+        lock.unlock()
     }
 
     /// `cliArgument` is the same number as `swift run SmoothDial <n>`: **multiplier = n / 100**. Must be **> 0**.
@@ -59,21 +73,30 @@ final class SmoothDialCore {
     private var lastLocation: CGPoint = .zero
     private let gestureTimeout: CFAbsoluteTime = 0.15
     private var endTimer: DispatchSourceTimer?
+    private var healthKeeper: Timer?
+    private static var didApplyLaunchCLIOverride = false
 
     private init() {}
+
+    func isRunning() -> Bool {
+        guard let tap else { return false }
+        return CGEvent.tapIsEnabled(tap: tap)
+    }
 
     /// Returns `true` if the event tap was installed successfully.
     @discardableResult
     func start() -> Bool {
-        guard !started else { return true }
+        guard !started else { return isRunning() }
+        return installTap()
+    }
 
+    private func installTap() -> Bool {
         if !AXIsProcessTrusted() {
             SmoothDialDebug.log("Accessibility permission not granted")
             return false
         }
 
-        started = true
-        applyLaunchSensitivityOverride()
+        applyLaunchSensitivityOverrideIfNeeded()
 
         let mask = CGEventMask(1 << CGEventType.scrollWheel.rawValue)
         guard let createdTap = CGEvent.tapCreate(
@@ -92,8 +115,10 @@ final class SmoothDialCore {
 
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, createdTap, 0)
         runLoopSource = source
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: createdTap, enable: true)
+        started = true
+        startHealthKeeper()
 
         let m = SmoothDialState.shared.multiplierValue()
         SmoothDialDebug.log(
@@ -103,17 +128,72 @@ final class SmoothDialCore {
     }
 
     func stop() {
-        endTimer?.cancel()
-        endTimer = nil
+        stopHealthKeeper()
+        resetGestureState()
+        tearDownTap()
+        started = false
+    }
+
+    /// Tear down and recreate the event tap (e.g. after sleep/wake or tap disable).
+    func restart(reason: String) {
+        guard AXIsProcessTrusted() else {
+            SmoothDialDebug.log("restart skipped (\(reason)): Accessibility permission not granted")
+            stop()
+            return
+        }
+        SmoothDialDebug.log("restarting event tap: \(reason)")
+        stopHealthKeeper()
+        resetGestureState()
+        tearDownTap()
+        _ = installTap()
+    }
+
+    private func applyLaunchSensitivityOverrideIfNeeded() {
+        guard !Self.didApplyLaunchCLIOverride else { return }
+        Self.didApplyLaunchCLIOverride = true
+        applyLaunchSensitivityOverride()
+    }
+
+    private func tearDownTap() {
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+            self.tap = nil
+        }
         if let source = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
             runLoopSource = nil
         }
-        if let tap {
-            CFMachPortInvalidate(tap)
-            self.tap = nil
+    }
+
+    private func resetGestureState() {
+        endTimer?.cancel()
+        endTimer = nil
+        inGesture = false
+    }
+
+    private func startHealthKeeper() {
+        stopHealthKeeper()
+        healthKeeper = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.checkTapHealth()
         }
-        started = false
+    }
+
+    private func stopHealthKeeper() {
+        healthKeeper?.invalidate()
+        healthKeeper = nil
+    }
+
+    private func checkTapHealth() {
+        guard started else { return }
+        guard AXIsProcessTrusted() else {
+            SmoothDialDebug.log("health check: Accessibility permission lost — stopping tap")
+            stop()
+            return
+        }
+        if !isRunning() {
+            restart(reason: "health check — tap not enabled")
+        }
     }
 
     fileprivate func handleScroll(proxy: CGEventTapProxy, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -163,6 +243,12 @@ final class SmoothDialCore {
         outX *= multiplier
         outY *= multiplier
 
+        let reversed = SmoothDialState.shared.isReverseScrollDirectionEnabled()
+        if reversed {
+            outX = -outX
+            outY = -outY
+        }
+
         let now = CFAbsoluteTimeGetCurrent()
         let gap = now - lastEventTime
         let scrollPhase: Int64
@@ -192,8 +278,8 @@ final class SmoothDialCore {
 
         SmoothDialDebug.log(
             String(
-                format: "OUT [smoothed] point=(%.2f,%.2f) phase=%lld mult=×%.3f",
-                outX, outY, scrollPhase, multiplier
+                format: "OUT [smoothed] point=(%.2f,%.2f) phase=%lld mult=×%.3f%@",
+                outX, outY, scrollPhase, multiplier, reversed ? " reversed" : ""
             )
         )
 
@@ -236,9 +322,15 @@ final class SmoothDialCore {
     }
 
     fileprivate func reenableTapIfNeeded() {
-        guard let tap else { return }
+        guard let tap else {
+            restart(reason: "tap disabled callback — no tap")
+            return
+        }
         SmoothDialDebug.log("event tap was disabled (timeout/user); re-enabling")
         CGEvent.tapEnable(tap: tap, enable: true)
+        if !CGEvent.tapIsEnabled(tap: tap) {
+            restart(reason: "tap disabled callback — re-enable failed")
+        }
     }
 }
 

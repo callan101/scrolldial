@@ -15,6 +15,7 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
     private var lastCommitted: Double = 100
 
     private var menu: NSMenu!
+    private var reverseScrollToggle: ToggleSwitch!
     private var manualModeToggle: ToggleSwitch!
     private var devicesMenuItem: NSMenuItem!
     private var deviceSubmenu: NSMenu!
@@ -24,6 +25,7 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
     func applicationDidFinishLaunching(_ notification: Notification) {
         lastCommitted = SmoothDialSettings.storedSensitivity()
         SmoothDialSettings.loadSavedSensitivityIntoState()
+        SmoothDialSettings.loadSavedReverseScrollIntoState()
         if SmoothDialDebug.isEnabled {
             SmoothDialDebug.log("debug logging on (stderr)")
         }
@@ -52,6 +54,11 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
         menu.addItem(sliderItem)
         menu.addItem(NSMenuItem.separator())
 
+        let reverseView = makeReverseScrollSwitchView()
+        let reverseItem = NSMenuItem()
+        reverseItem.view = reverseView
+        menu.addItem(reverseItem)
+
         let switchView = makeManualSwitchView()
         let switchItem = NSMenuItem()
         switchItem.view = switchView
@@ -72,8 +79,40 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
 
         statusItem.menu = menu
 
+        registerSystemLifecycleObservers()
+
         if !SmoothDialCore.shared.start() {
             promptForAccessibility()
+        }
+    }
+
+    private func registerSystemLifecycleObservers() {
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(
+            self,
+            selector: #selector(systemWillSleep(_:)),
+            name: NSWorkspace.willSleepNotification,
+            object: nil
+        )
+        nc.addObserver(
+            self,
+            selector: #selector(systemDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func systemWillSleep(_ notification: Notification) {
+        SmoothDialDebug.log("system will sleep — stopping event tap")
+        SmoothDialCore.shared.stop()
+    }
+
+    @objc private func systemDidWake(_ notification: Notification) {
+        SmoothDialDebug.log("system did wake — re-enumerating HID devices and restarting event tap")
+        HIDDeviceManager.shared.enumerate()
+        rebuildDeviceSubmenuItems()
+        if !SmoothDialCore.shared.start() {
+            SmoothDialDebug.log("failed to restart event tap after wake")
         }
     }
 
@@ -199,6 +238,33 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
         return false
     }
 
+    // MARK: - Reverse scroll direction
+
+    private func makeReverseScrollSwitchView() -> NSView {
+        let w: CGFloat = 288
+        let h: CGFloat = 30
+        let padX: CGFloat = 16
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: h))
+
+        let label = NSTextField(labelWithString: "Reverse scroll direction")
+        label.font = NSFont.systemFont(ofSize: 13)
+        label.frame = NSRect(x: padX, y: 6, width: 200, height: 18)
+
+        let initial = SmoothDialState.shared.isReverseScrollDirectionEnabled()
+        reverseScrollToggle = ToggleSwitch(isOn: initial) { isOn in
+            SmoothDialState.shared.setReverseScrollDirection(isOn)
+            UserDefaults.standard.set(isOn, forKey: SmoothDialSettings.reverseScrollKey)
+            SmoothDialDebug.log("reverse scroll direction: \(isOn ? "ON" : "OFF")")
+        }
+        let tw: CGFloat = 32
+        let th: CGFloat = 18
+        reverseScrollToggle.frame = NSRect(x: w - padX - tw, y: (h - th) / 2, width: tw, height: th)
+
+        container.addSubview(label)
+        container.addSubview(reverseScrollToggle)
+        return container
+    }
+
     // MARK: - Manual device selection switch
 
     private func makeManualSwitchView() -> NSView {
@@ -249,6 +315,12 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
         }
     }
 
+    private func rebuildDeviceSubmenuItems() {
+        deviceSubmenu.removeAllItems()
+        deviceMenuItems.removeAll()
+        buildDeviceSubmenuItems()
+    }
+
     private func refreshDeviceCheckmarks() {
         let dm = HIDDeviceManager.shared
         allDevicesItem.state = dm.isAllSelected ? .on : .off
@@ -281,6 +353,7 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         SmoothDialCore.shared.stop()
     }
 }
@@ -288,6 +361,10 @@ final class SmoothDialAppDelegate: NSObject, NSApplicationDelegate, NSTextFieldD
 extension SmoothDialAppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         if menu === self.menu {
+            reverseScrollToggle.setOn(
+                SmoothDialState.shared.isReverseScrollDirectionEnabled(),
+                animated: false
+            )
             let manual = HIDDeviceManager.shared.isManualMode
             manualModeToggle.setOn(manual, animated: false)
             devicesMenuItem.isEnabled = manual
@@ -361,6 +438,7 @@ final class ToggleSwitch: NSView {
 
 enum SmoothDialSettings {
     static let defaultsKey = "SmoothDial.sensitivityPercent"
+    static let reverseScrollKey = "SmoothDial.reverseScrollDirection"
 
     static func storedSensitivity() -> Double {
         guard UserDefaults.standard.object(forKey: defaultsKey) != nil else { return 100 }
@@ -369,8 +447,16 @@ enum SmoothDialSettings {
         return 100
     }
 
+    static func storedReverseScrollDirection() -> Bool {
+        UserDefaults.standard.bool(forKey: reverseScrollKey)
+    }
+
     static func loadSavedSensitivityIntoState() {
         let n = storedSensitivity()
         SmoothDialState.shared.setSensitivityCLI(n)
+    }
+
+    static func loadSavedReverseScrollIntoState() {
+        SmoothDialState.shared.setReverseScrollDirection(storedReverseScrollDirection())
     }
 }
